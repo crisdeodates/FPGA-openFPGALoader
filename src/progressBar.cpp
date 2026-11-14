@@ -5,17 +5,27 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <chrono>
 #include <string>
 #include "progressBar.hpp"
 #include "display.hpp"
 
-ProgressBar::ProgressBar(std::string mess, int maxValue, int progressLen,
-		bool quiet): _mess(mess), _maxValue(maxValue),
-		_progressLen(progressLen), _quiet(quiet), _first(true)
+bool ProgressBar::_force_terminal_mode = false;
+
+ProgressBar::ProgressBar(const std::string &mess, int maxValue,
+		int progressLen, bool quiet): _mess(mess), _maxValue(maxValue),
+		_progressLen(progressLen), last_time(std::chrono::system_clock::now()),
+		_quiet(quiet), _first(true),
+		_is_tty(_force_terminal_mode || isatty(STDOUT_FILENO) == 1)
 {
-	last_time = std::chrono::system_clock::now();
 }
+
+void ProgressBar::setForceTerminalMode()
+{
+	_force_terminal_mode = true;
+}
+
 void ProgressBar::display(int value, char force)
 {
 	if (_quiet) {
@@ -40,12 +50,12 @@ void ProgressBar::display(int value, char force)
 
 	printInfo("\r" + _mess + ": [", false);
 	for (int z=0; z < nbEq; z++) {
-		fputc('=', stderr);
+		fputc('=', stdout);
 	}
-	fprintf(stderr, "%*s", (int)(_progressLen-nbEq), "");
+	fprintf(stdout, "%*s", (int)(_progressLen-nbEq), "");
 	char perc_str[11];
 	snprintf(perc_str, sizeof(perc_str), "] %3.2f%%", percent);
-	printInfo(perc_str, false);
+	printInfo(perc_str, !_is_tty);
 }
 void ProgressBar::done()
 {

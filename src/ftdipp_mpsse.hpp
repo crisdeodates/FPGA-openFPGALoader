@@ -8,20 +8,12 @@
 #include <ftdi.h>
 #include <string>
 
+#include "cable.hpp"
+
 class FTDIpp_MPSSE {
 	public:
-		typedef struct {
-			int vid;
-			int pid;
-			int interface;
-			int bit_low_val;
-			int bit_low_dir;
-			int bit_high_val;
-			int bit_high_dir;
-		} mpsse_bit_config;
-
-		FTDIpp_MPSSE(const mpsse_bit_config &cable, const std::string &dev,
-			const std::string &serial, uint32_t clkHZ, bool verbose = false);
+		FTDIpp_MPSSE(const cable_t &cable, const std::string &dev,
+			const std::string &serial, uint32_t clkHZ, int8_t verbose = 0);
 		~FTDIpp_MPSSE();
 
 		int init(unsigned char latency, unsigned char bitmask_mode,
@@ -31,6 +23,8 @@ class FTDIpp_MPSSE {
 
 		int vid() {return _vid;}
 		int pid() {return _pid;}
+		uint8_t bus_addr()    {return _bus;}
+		uint8_t device_addr() {return _addr;}
 
 		/* access gpio */
 		/* read gpio */
@@ -71,9 +65,11 @@ class FTDIpp_MPSSE {
 		mpsse_bit_config _cable;
 		int _vid;
 		int _pid;
+		int _index;
 	private:
-		int _bus;
-		int _addr;
+		uint8_t _bus;
+		uint8_t _addr;
+		uint8_t _bitmode;
 		char _product[64];
 		unsigned char _interface;
 		/* gpio */
@@ -85,6 +81,8 @@ class FTDIpp_MPSSE {
 		int _num;
 		unsigned char *_buffer;
 		uint8_t _iproduct[200];
+		uint8_t _imanufacturer[200];
+		uint8_t _iserialnumber[200];
 };
 
 #endif

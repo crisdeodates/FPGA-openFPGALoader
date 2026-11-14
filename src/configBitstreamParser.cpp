@@ -10,37 +10,73 @@
 #include <strings.h>
 #include <unistd.h>
 
+#ifdef HAS_ZLIB
+#ifdef HAS_ZLIBNG
+#include <zlib-ng.h>
+#define z_stream zng_stream
+#define inflateInit2(_strm, _windowBits) zng_inflateInit2(_strm, _windowBits)
+#define inflate(_strm, __flush)          zng_inflate(_strm, __flush)
+#define inflateEnd(_strm)                zng_inflateEnd(_strm)
+#else
+#include <zlib.h>
+#endif
+#endif
+
 #include "display.hpp"
 
 #include "configBitstreamParser.hpp"
 
-using namespace std;
 
-ConfigBitstreamParser::ConfigBitstreamParser(const string &filename, int mode,
+ConfigBitstreamParser::ConfigBitstreamParser(const std::string &filename, int mode,
 			bool verbose): _filename(filename), _bit_length(0),
 			_file_size(0), _verbose(verbose),
 			_bit_data(), _raw_data(), _hdr()
 {
 	(void) mode;
 	if (!filename.empty()) {
+		size_t offset =  filename.find_last_of(".");
+
 		FILE *_fd = fopen(filename.c_str(), "rb");
-		if (!_fd)
-			throw std::runtime_error("Error: fail to open " + _filename);
+		if (!_fd) {
+			/* if file not found it's maybe a gz -> try without gz */
+			if (offset != std::string::npos) {
+				_filename = filename.substr(0, offset);
+				_fd = fopen(_filename.c_str(), "rb");
+			}
+
+			/* test again */
+			if (!_fd)
+				throw std::runtime_error("Error: fail to open " + filename);
+		}
 
 		fseek(_fd, 0, SEEK_END);
 		_file_size = ftell(_fd);
 		fseek(_fd, 0, SEEK_SET);
 
 		_raw_data.resize(_file_size);
-		_bit_data.reserve(_file_size);
 
 		int ret = fread((char *)&_raw_data[0], sizeof(char), _file_size, _fd);
+		fclose(_fd);
 		if (ret != _file_size)
 			throw std::runtime_error("Error: fail to read " + _filename);
-		fclose(_fd);
+
+		if (offset != std::string::npos) {
+			std::string extension = _filename.substr(_filename.find_last_of(".") +1);
+			if (extension == "gz" || extension == "gzip") {
+				std::string tmp;
+				tmp.reserve(_file_size);
+				if (!decompress_bitstream(_raw_data, &tmp))
+					throw std::runtime_error("Error: decompress failed");
+				_raw_data.clear();
+				_raw_data.append(std::move(tmp));
+				_file_size = _raw_data.size();
+			}
+		}
+		_bit_data.reserve(_file_size);
+
 	} else if (!isatty(fileno(stdin))) {
 		_file_size = 0;
-		string tmp;
+		std::string tmp;
 		tmp.resize(4096);
 		size_t size;
 
@@ -58,7 +94,7 @@ ConfigBitstreamParser::~ConfigBitstreamParser()
 {
 }
 
-string ConfigBitstreamParser::getHeaderVal(string key)
+std::string ConfigBitstreamParser::getHeaderVal(std::string key)
 {
 	auto val = _hdr.find(key);
 	if (val == _hdr.end())
@@ -70,7 +106,7 @@ void ConfigBitstreamParser::displayHeader()
 {
 	if (_hdr.empty())
 		return;
-	cout << "bitstream header infos" << endl;
+	printInfo("bitstream header infos");
 	for (auto it = _hdr.begin(); it != _hdr.end(); it++) {
 		printInfo((*it).first + ": ", false);
 		printSuccess((*it).second);
@@ -117,5 +153,76 @@ uint8_t ConfigBitstreamParser::reverseByte(uint8_t src)
 	return dst;
 #else
 	return revertByteArr[src];
+#endif
+}
+
+uint32_t ConfigBitstreamParser::reverse_32(const uint32_t src)
+{
+	return (revertByteArr[(src >> 0)  & 0xff] << 24) |
+		   (revertByteArr[(src >> 8)  & 0xff] << 16) |
+		   (revertByteArr[(src >> 16) & 0xff] <<  8) |
+		   (revertByteArr[(src >> 24) & 0xff] <<  0);
+}
+
+bool ConfigBitstreamParser::decompress_bitstream(std::string source, std::string *dest)
+{
+#ifndef HAS_ZLIB
+	(void)source;
+	(void)dest;
+	printError("openFPGALoader is build without zlib support\n"
+			"can't uncompress file\n");
+	return false;
+#else
+#define CHUNK 16384
+	int ret;
+	unsigned have;
+	z_stream strm;
+	unsigned char *in = (unsigned char *)&source[0];
+	unsigned char out[CHUNK];
+
+	/* allocate inflate state */
+	strm.zalloc = Z_NULL;
+	strm.zfree = Z_NULL;
+	strm.opaque = Z_NULL;
+	strm.avail_in = 0;
+	strm.next_in = Z_NULL;
+	ret = inflateInit2(&strm, 15+16);
+	if (ret != Z_OK)
+		return ret;
+
+	uint32_t pos = source.size();
+	uint32_t xfer = CHUNK;
+
+	/* decompress until deflate stream ends or end of file */
+	do {
+		/* if buffer has a size < CHUNK */
+		if (pos < CHUNK)
+			xfer = pos;
+		strm.next_in = in;  // chunk to uncompress
+		strm.avail_in = xfer;  // chunk size
+
+		/* run inflate() on input until output buffer not full */
+		do {
+			strm.avail_out = CHUNK;  // specify buffer size
+			strm.next_out = out;     // buffer
+			ret = inflate(&strm, Z_BLOCK);
+			if (ret == Z_NEED_DICT || ret == Z_DATA_ERROR
+					|| ret == Z_MEM_ERROR) {
+				(void)inflateEnd(&strm);
+				return false;
+			}
+			have = CHUNK - strm.avail_out;  // compute data size
+											// after uncompress
+			dest->append((const char*)out, have);  // store
+		} while (strm.avail_in != 0);
+		in += xfer;  // update input buffer position
+		pos -= xfer;  // update len to decompress
+
+	/* done when inflate() says it's done */
+	} while (ret != Z_STREAM_END);
+
+	/* clean up and return */
+	(void)inflateEnd(&strm);
+	return true;
 #endif
 }

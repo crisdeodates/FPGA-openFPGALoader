@@ -25,24 +25,24 @@ class DFUFileParser: public ConfigBitstreamParser {
 		DFUFileParser(const std::string &filename, bool verbose);
 		/*!
 		 * \brief read full content of the file, fill the buffer
-		 * \return EXIT_SUCCESS is file is fully read, EXIT_FAILURE otherwhise
+		 * \return EXIT_SUCCESS is file is fully read, EXIT_FAILURE otherwise
 		 */
 		int parse() override;
 		/*!
 		 * \brief read DFU suffix content of the file, fill _hdr structure
-		 * \return EXIT_SUCCESS if suffix is fully read, EXIT_FAILURE otherwhise
+		 * \return EXIT_SUCCESS if suffix is fully read, EXIT_FAILURE otherwise
 		 */
 		int parseHeader();
 		/*!
 		 * \brief return vendor id associated
 		 * \return _idVendor
 		 */
-		uint16_t vendorID() {return _idVendor;}
+		uint16_t vendorID() const noexcept {return _idVendor;}
 		/*!
 		 * \brief return product id associated
 		 * \return _idProduct
 		 */
-		uint16_t productID() {return _idProduct;}
+		uint16_t productID() const noexcept {return _idProduct;}
 
 	private:
 		/*!

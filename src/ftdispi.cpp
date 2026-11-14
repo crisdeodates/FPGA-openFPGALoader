@@ -8,7 +8,9 @@
 #include <ftdi.h>
 #include <unistd.h>
 #include <string.h>
+
 #include "board.hpp"
+#include "display.hpp"
 #include "ftdipp_mpsse.hpp"
 #include "ftdispi.hpp"
 
@@ -63,27 +65,29 @@ void FtdiSpi::setMode(uint8_t mode)
 		gpio_clear(_clk);
 }
 
-static FTDIpp_MPSSE::mpsse_bit_config bit_conf =
-	{0x403, 0x6010, INTERFACE_B, 0x08, 0x0B, 0x08, 0x0B};
+static cable_t cable = {
+	MODE_FTDI_SERIAL, 0x403, 0x6010, 0, 0, {INTERFACE_B, 0x08, 0x0B, 0x08, 0x0B, 0, -1}
+};
 
 FtdiSpi::FtdiSpi(int vid, int pid, unsigned char interface, uint32_t clkHZ,
-	bool verbose):
-	FTDIpp_MPSSE(bit_conf, "", "", clkHZ, verbose)
+	int8_t verbose):
+	FTDIpp_MPSSE(cable, "", "", clkHZ, verbose)
 {
 	(void)pid;
 	(void)vid;
 	(void)interface;
+
+	init(1, 0x00, BITMODE_MPSSE);
+
 	setMode(0);
 	setCSmode(SPI_CS_AUTO);
 	setEndianness(SPI_MSB_FIRST);
-
-	init(1, 0x00, BITMODE_MPSSE);
 }
 
-FtdiSpi::FtdiSpi(const FTDIpp_MPSSE::mpsse_bit_config &conf,
+FtdiSpi::FtdiSpi(const cable_t &cable,
 		spi_pins_conf_t spi_config,
-		uint32_t clkHZ, bool verbose):
-		FTDIpp_MPSSE(conf, "", "", clkHZ, verbose),
+		uint32_t clkHZ, int8_t verbose):
+		FTDIpp_MPSSE(cable, "", "", clkHZ, verbose),
 		_cs_bits(1 << 3), _clk(1 << 0), _holdn(0), _wpn(0)
 {
 	if (spi_config.cs_pin)
@@ -93,7 +97,9 @@ FtdiSpi::FtdiSpi(const FTDIpp_MPSSE::mpsse_bit_config &conf,
 	if (spi_config.holdn_pin)
 		_holdn = spi_config.holdn_pin;
 	if (spi_config.wpn_pin)
-		_holdn = spi_config.wpn_pin;
+		_wpn = spi_config.wpn_pin;
+
+	init(1, _cs_bits, BITMODE_MPSSE);
 
 	/* clk is fixed by MPSSE engine
 	 * but CS, holdn, wpn are free -> update bits direction
@@ -105,7 +111,6 @@ FtdiSpi::FtdiSpi(const FTDIpp_MPSSE::mpsse_bit_config &conf,
 	setCSmode(SPI_CS_AUTO);
 	setEndianness(SPI_MSB_FIRST);
 
-	init(1, 0x00, BITMODE_MPSSE);
 }
 
 FtdiSpi::~FtdiSpi()
@@ -162,18 +167,21 @@ int FtdiSpi::ft2232_spi_wr_then_rd(
 
 /* Returns 0 upon success, a negative number upon errors. */
 int FtdiSpi::ft2232_spi_wr_and_rd(//struct ftdi_spi *spi,
-			    uint32_t writecnt,
-			    const uint8_t * writearr, uint8_t * readarr)
+				uint32_t writecnt,
+				const uint8_t * writearr, uint8_t * readarr)
 {
-	uint32_t max_xfer = (readarr) ? _buffer_size : 4096;
+	// -3: for MPSSE instruction
+	const uint16_t max_xfer = ((readarr) ? _buffer_size : 4096);
 	uint8_t buf[max_xfer];
-	int i = 0;
+	uint8_t cmd[] = {
+		static_cast<uint8_t>(((readarr) ? (MPSSE_DO_READ | _rd_mode) : 0) |
+			((writearr) ? (MPSSE_DO_WRITE | _wr_mode) : 0)),
+		0, 0};
 	int ret = 0;
 
 	uint8_t *rx_ptr = readarr;
 	uint8_t *tx_ptr = (uint8_t *)writearr;
 	uint32_t len = writecnt;
-	uint32_t xfer;
 
 	if (_cs_mode == SPI_CS_AUTO) {
 		clearCs();
@@ -187,33 +195,41 @@ int FtdiSpi::ft2232_spi_wr_and_rd(//struct ftdi_spi *spi,
 	 * operations.
 	 */
 	while (len > 0) {
-		xfer = (len > max_xfer) ? max_xfer : len;
+		const uint16_t xfer = (len > max_xfer) ? max_xfer : len;
+		cmd[1] = static_cast<uint8_t>(((xfer - 1) >> 0) & 0xff);
+		cmd[2] = static_cast<uint8_t>(((xfer - 1) >> 8) & 0xff);
+		uint16_t xfer_len = 0; // 0 when read-only
 
-		buf[i++] = ((readarr) ? (MPSSE_DO_READ | _rd_mode) : 0) |
-					((writearr) ? (MPSSE_DO_WRITE | _wr_mode) : 0);
-		buf[i++] = (xfer - 1) & 0xff;
-		buf[i++] = ((xfer - 1) >> 8) & 0xff;
+		mpsse_store(cmd, 3);
 		if (writearr) {
-			memcpy(buf + i, tx_ptr, xfer);
+			memcpy(buf, tx_ptr, xfer);
 			tx_ptr += xfer;
-			i += xfer;
+			xfer_len = xfer;
 		}
-
-		ret = mpsse_store(buf, i);
-		if (ret)
-			printf("send_buf failed before read: %i %s\n", ret, ftdi_get_error_string(_ftdi));
-		i = 0;
+		ret = mpsse_store(buf, xfer_len);
+		if (ret) {
+			printError("send_buf failed before read with error: " +
+				std::string(ftdi_get_error_string(_ftdi)) + " (" +
+				std::to_string(ret) + ")");
+			return ret;
+		}
 		if (readarr) {
-			//if (ret == 0) {
 			ret = mpsse_read(rx_ptr, xfer);
-			if ((uint32_t)ret != xfer)
-				printf("get_buf failed: %i\n", ret);
-			//}
+			if (ret < 0) {
+				printError("read failed with error: " +
+					std::string(ftdi_get_error_string(_ftdi)) + " (" +
+					std::to_string(ret) + ")");
+				return ret;
+			}
 			rx_ptr += xfer;
 		} else {
 			ret = mpsse_write();
-			if ((uint32_t)ret != xfer+3)
-				printf("error %d %d\n", ret, i);
+			if (ret < 0) {
+				printError("write failed with error: " +
+					std::string(ftdi_get_error_string(_ftdi)) + " (" +
+					std::to_string(ret) + ")");
+				return ret;
+			}
 		}
 		len -= xfer;
 
@@ -227,8 +243,8 @@ int FtdiSpi::ft2232_spi_wr_and_rd(//struct ftdi_spi *spi,
 	return 0;
 }
 
-/* method spiInterface::spi_put */
-int FtdiSpi::spi_put(uint8_t cmd, uint8_t *tx, uint8_t *rx, uint32_t len)
+/* method flashInterface::spi_put */
+int FtdiSpi::spi_put(uint8_t cmd, const uint8_t *tx, uint8_t *rx, uint32_t len)
 {
 	uint32_t xfer_len = len + 1;
 	uint8_t jtx[xfer_len];
@@ -238,7 +254,7 @@ int FtdiSpi::spi_put(uint8_t cmd, uint8_t *tx, uint8_t *rx, uint32_t len)
 	if (tx != NULL)
 		memcpy(jtx+1, tx, len);
 
-	/* send first alreay stored cmd,
+	/* send first already stored cmd,
 	 * in the same time store each byte
 	 * to next
 	 */
@@ -250,13 +266,13 @@ int FtdiSpi::spi_put(uint8_t cmd, uint8_t *tx, uint8_t *rx, uint32_t len)
 	return 0;
 }
 
-/* method spiInterface::spi_put */
-int FtdiSpi::spi_put(uint8_t *tx, uint8_t *rx, uint32_t len)
+/* method flashInterface::spi_put */
+int FtdiSpi::spi_put(const uint8_t *tx, uint8_t *rx, uint32_t len)
 {
 	return ft2232_spi_wr_and_rd(len, tx, rx);
 }
 
-/* method spiInterface::spi_wait
+/* method flashInterface::spi_wait
  */
 int FtdiSpi::spi_wait(uint8_t cmd, uint8_t mask, uint8_t cond,
 			uint32_t timeout, bool verbose)

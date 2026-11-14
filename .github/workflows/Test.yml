@@ -7,34 +7,71 @@ on:
 
 jobs:
 
+  doc:
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    name: '📓 Docs'
+
+    steps:
+      - name: '🧰 Checkout'
+        uses: actions/checkout@v4
+
+      - name: '🐍 Setup Python'
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: '📦 Install dependencies'
+        run: |
+          pip install sphinx PyYAML tabulate
+
+      - name: '📓 Build docs'
+        run: |
+          sphinx-build -b html doc doc/_build/html
+
+      - name: '⬆️ Deploy to gh-pages'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: doc/_build/html
+          publish_branch: gh-pages
+          keep_files: false
+
+      - name: 'Upload docs artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openFPGALoader-Documentation
+          path: doc/_build/html
+
 
   lin-build:
     strategy:
       fail-fast: false
-      max-parallel: 4
       matrix:
         os:
-        - 18
-        - 20
+        - 22
+        - 24
     name: '🚧🐧 Ubuntu ${{ matrix.os }} | build'
     runs-on: ubuntu-${{ matrix.os }}.04
     steps:
 
     - name: '🧰 Checkout'
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
 
     - name: '⚙️ Install dependencies'
       run: |
         sudo apt update -qq
         sudo apt install -y \
           cmake \
+          gzip \
           libftdi1-2 \
           libftdi1-dev \
           libhidapi-libusb0 \
           libhidapi-dev \
           libudev-dev \
           pkg-config \
-          tree
+          tree \
+          zlib1g-dev
 
     - name: '🚧 Build tarball'
       run: |
@@ -54,7 +91,7 @@ jobs:
         tar -cvzf ../ubtuntu${{ matrix.os }}.04-openFPGALoader.tgz -C dist .
 
     - name: '📤 Upload artifact: tarball'
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: ubtuntu${{ matrix.os }}.04-openFPGALoader
         path: ubtuntu${{ matrix.os }}.04-openFPGALoader.tgz
@@ -67,15 +104,38 @@ jobs:
         tree .
 
 
+  mac-build:
+    strategy:
+      fail-fast: false
+    name: '🚧🐧 macOS latest | build'
+    runs-on: macos-latest
+    steps:
+
+    - name: '🧰 Checkout'
+      uses: actions/checkout@v4
+
+    - name: '⚙️ Install dependencies'
+      run: |
+        #brew update
+        brew install --only-dependencies openFPGALoader
+        brew install hidapi
+
+    - name: '🚧 Build tarball'
+      run: |
+        mkdir build
+        cd build
+        cmake ..
+        cmake --build .
+
+
   lin-test:
     needs: lin-build
     strategy:
       fail-fast: false
-      max-parallel: 4
       matrix:
         os:
-        - 18
-        - 20
+        - 22
+        - 24
     name: '🚦🐧 Ubuntu ${{ matrix.os }} | test'
     runs-on: ubuntu-${{ matrix.os }}.04
     steps:
@@ -86,10 +146,11 @@ jobs:
         sudo apt install -y \
           libftdi1-2 \
           libhidapi-libusb0 \
-          udev
+          udev \
+          zlib1g
 
     - name: '📥 Download artifact: package'
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v4.1.7
       with:
         name: ubtuntu${{ matrix.os }}.04-openFPGALoader
 
@@ -102,115 +163,54 @@ jobs:
         openFPGALoader --detect || true
 
 
-  win-makepkg:
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { icon: '⬛', sys: mingw32, env: i686 }
-          - { icon: '🟦', sys: mingw64, env: x86_64 }
-          - { icon: '🟨', sys: ucrt64,  env: ucrt-x86_64 }  # Experimental!
-          - { icon: '🟧', sys: clang64, env: clang-x86_64 } # Experimental!
-    name: '🚧${{ matrix.icon }} ${{ matrix.sys }} | makepkg'
-    defaults:
-      run:
-        shell: msys2 {0}
-    env:
-      MINGW_ARCH: ${{ matrix.sys }}
+  win-jobs:
+    name: ⬜ Generate list of MSYS2 jobs
+    runs-on: ubuntu-latest
+    outputs:
+      jobs: ${{ steps.matrix.outputs.jobs }}
     steps:
-
-    - name: '⚙️ git config'
-      run: git config --global core.autocrlf input
-      shell: bash
-
-    - name: '🧰 Checkout'
-      uses: actions/checkout@v2
+    - id: matrix
+      uses: msys2/setup-msys2/matrix@a5d2c5a565c520efa5f477391e4e3f87c2e08f46
       with:
-        fetch-depth: 0
+        systems: >-
+          ucrt64
+          clang64
 
-    - name: '${{ matrix.icon }} Setup MSYS2'
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: ${{ matrix.sys }}
-        update: true
-        install: >
-          git
-          base-devel
-          tree
-          mingw-w64-${{ matrix.env }}-toolchain
-
-    - name: '🚧 Build package'
-      run: |
-        cd scripts/msys2
-        makepkg-mingw --noconfirm --noprogressbar -sCLf
-
-    - name: '📤 Upload artifact: package'
-      uses: actions/upload-artifact@v2
-      with:
-        name: ${{ matrix.sys }}-openFPGALoader
-        path: scripts/msys2/*${{ matrix.env }}*.zst
-
-    - name: '🔍 Show package content'
-      run: |
-        mkdir tmp
-        cd tmp
-        tar -xf ../scripts/msys2/*.zst
-        tree .
-
-
-  win-test:
-    needs: win-makepkg
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { icon: '⬛', sys: mingw32, env: i686 }
-          - { icon: '🟦', sys: mingw64, env: x86_64 }
-          - { icon: '🟨', sys: ucrt64,  env: ucrt-x86_64 }  # Experimental!
-          - { icon: '🟧', sys: clang64, env: clang-x86_64 } # Experimental!
-    name: '🚦${{ matrix.icon }} ${{ matrix.sys }} | test'
-    defaults:
-      run:
-        shell: msys2 {0}
-    steps:
-
-    - name: '${{ matrix.icon }} Setup MSYS2'
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: ${{ matrix.sys }}
-        update: true
-
-    - name: '📥 Download artifact: package'
-      uses: actions/download-artifact@v2
-      with:
-        name: ${{ matrix.sys }}-openFPGALoader
-
-    - name: '🛠️ Install package'
-      run: pacman -U --noconfirm --noprogressbar *.zst
-
-    - name: '🚦 Test package'
-      run: |
+  win:
+    needs: win-jobs
+    uses: msys2/setup-msys2/.github/workflows/PKGBUILD.yml@a5d2c5a565c520efa5f477391e4e3f87c2e08f46
+    with:
+      name: openFPGALoader
+      matrix: ${{ needs.win-jobs.outputs.jobs }}
+      path: scripts/msys2
+      test: |
+        uname -a
+        which openFPGALoader
         openFPGALoader --help
         openFPGALoader --detect || true
 
 
   Release:
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || contains(github.ref, 'refs/tags/'))
-    needs: [ lin-test, win-test ]
+    needs: [ doc, lin-test, win ]
     runs-on: ubuntu-latest
     name: '📦 Release'
     steps:
 
     - name: '📥 Download artifacts'
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v4.1.7
       with:
         path: artifact
 
+    - name: '✉️ Package Documentation'
+      run: |
+        cd artifact
+        tar cvzf openFPGALoader-Documentation.tar.gz openFPGALoader-Documentation
+        rm -rf openFPGALoader-Documentation
+
     # Tagged: create a pre-release or a release (semver)
     # Untagged: update the assets of pre-release 'nightly'
-    - uses: eine/tip@master
+    - uses: pyTooling/Actions/releaser@r0
       with:
         token: ${{ github.token }}
         tag: 'nightly'

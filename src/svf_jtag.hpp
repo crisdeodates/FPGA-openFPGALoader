@@ -1,40 +1,40 @@
 // SPDX-License-Identifier: Apache-2.0
 /*
- * Copyright (C) 2019 Gwenhael Goavec-Merou <gwenhael.goavec-merou@trabucayre.com>
+ * Copyright (C) 2019-2022 Gwenhael Goavec-Merou <gwenhael.goavec-merou@trabucayre.com>
  */
 
-#ifndef SVF_JTAG_HPP
-#define SVF_JTAG_HPP
+#ifndef SRC_SVF_JTAG_HPP_
+#define SRC_SVF_JTAG_HPP_
 #include <iostream>
+#include <string>
 #include <vector>
 #include <map>
 
 #include "jtag.hpp"
-using namespace std;
 
 class SVF_jtag {
  public:
 	SVF_jtag(Jtag *jtag, bool verbose);
 	~SVF_jtag();
-	void parse(string filename);
+	void parse(std::string filename);
 	void setVerbose(bool verbose) {_verbose = verbose;}
 
 	private:
 	typedef struct {
 		uint32_t len;
-		string tdo;
-		string tdi;
-		string mask;
-		string smask;
+		std::string tdo;
+		std::string tdi;
+		std::string mask;
+		std::string smask;
 	} svf_XYR;
 
-		void split_str(string const &str, vector<string> &vparse);
+		void split_str(const std::string &str, std::vector<std::string> &vparse);
 		void clear_XYR(svf_XYR &t);
-		void parse_XYR(vector<string> const &vstr/*, svf_stat &svfs*/, svf_XYR &t);
-		void parse_runtest(vector<string> const &vstr);
-		void handle_instruction(vector<string> const &vstr);
+		void parse_XYR(const std::vector<std::string> &vstr/*, svf_stat &svfs*/, svf_XYR &t);
+		void parse_runtest(const std::vector<std::string> &vstr);
+		void handle_instruction(const std::vector<std::string> &vstr);
 
-	map <string, uint8_t> fsm_state = {
+	std::map<std::string, uint8_t> fsm_state = {
 		{"RESET", 0},
 		{"IDLE", 1},
 		{"DRSELECT", 2},
@@ -57,10 +57,10 @@ class SVF_jtag {
 	bool _verbose;
 
 	uint32_t _freq_hz;
-	int _enddr;
-	int _endir;
-	int _run_state;
-	int _end_state;
+	Jtag::tapState_t _enddr;
+	Jtag::tapState_t _endir;
+	Jtag::tapState_t _run_state;
+	Jtag::tapState_t _end_state;
 	svf_XYR hdr;
 	svf_XYR hir;
 	svf_XYR sdr;
@@ -68,4 +68,4 @@ class SVF_jtag {
 	svf_XYR tdr;
 	svf_XYR tir;
 };
-#endif
+#endif  // SRC_SVF_JTAG_HPP_

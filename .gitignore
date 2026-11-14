@@ -38,3 +38,16 @@ openFPGALoader
 # Build directory
 build/
 
+# Documentation
+/doc/__pycache__/
+/doc/_build/
+/doc/_theme/
+/doc/compatibility/boards.inc
+/doc/compatibility/cable.inc
+/doc/compatibility/fpga.inc
+
+# VSCode local settings directory
+/.vscode/
+
+# CLion local settings directory
+/.idea/

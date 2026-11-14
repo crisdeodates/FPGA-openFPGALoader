@@ -11,10 +11,11 @@
 #include <vector>
 
 #include "board.hpp"
+#include "cable.hpp"
 #include "ftdipp_mpsse.hpp"
-#include "spiInterface.hpp"
+#include "flashInterface.hpp"
 
-class FtdiSpi : public FTDIpp_MPSSE, SPIInterface {
+class FtdiSpi : public FTDIpp_MPSSE, FlashInterface {
  public:
 	enum SPI_endianness {
 		SPI_MSB_FIRST = 0,
@@ -27,10 +28,10 @@ class FtdiSpi : public FTDIpp_MPSSE, SPIInterface {
 	};
 
 	FtdiSpi(int vid, int pid, unsigned char interface, uint32_t clkHZ,
-		bool verbose);
-	FtdiSpi(const FTDIpp_MPSSE::mpsse_bit_config &conf,
+		int8_t verbose);
+	FtdiSpi(const cable_t &cable,
 		spi_pins_conf_t spi_config, uint32_t clkHZ,
-		bool verbose);
+		int8_t verbose);
 	~FtdiSpi();
 
 	void setMode(uint8_t mode);
@@ -50,11 +51,21 @@ class FtdiSpi : public FTDIpp_MPSSE, SPIInterface {
 							const uint8_t *writearr, uint8_t *readarr);
 
 	/* spi interface */
-	int spi_put(uint8_t cmd, uint8_t *tx, uint8_t *rx,
+	int spi_put(uint8_t cmd, const uint8_t *tx, uint8_t *rx,
 			uint32_t len) override;
-	int spi_put(uint8_t *tx, uint8_t *rx, uint32_t len) override;
+	int spi_put(const uint8_t *tx, uint8_t *rx, uint32_t len) override;
 	int spi_wait(uint8_t cmd, uint8_t mask, uint8_t cond,
 			uint32_t timeout, bool verbose=false) override;
+
+ protected:
+	/*!
+	 * \brief move device to SPI access
+	 */
+	virtual bool prepare_flash_access() override {return true;}
+	/*!
+	 * \brief end of device to SPI access
+	 */
+	virtual bool post_flash_access() override {return true;}
 
  private:
 	uint8_t _cs;

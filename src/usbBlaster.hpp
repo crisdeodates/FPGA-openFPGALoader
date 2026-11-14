@@ -3,17 +3,21 @@
  * Copyright (C) 2020 Gwenhael Goavec-Merou <gwenhael.goavec-merou@trabucayre.com>
  */
 
-#ifndef USBBLASTER_H
-#define USBBLASTER_H
+#ifndef SRC_USBBLASTER_HPP_
+#define SRC_USBBLASTER_HPP_
+#ifdef USE_LIBFTDI
 #include <ftdi.h>
+#endif
 #include <iostream>
 #include <string>
 #include <vector>
 
-#include "board.hpp"
-#include "jtagInterface.hpp"
+#include "cable.hpp"
+#ifdef USE_LIBFTDI
 #include "ftdipp_mpsse.hpp"
+#endif
 #include "fx2_ll.hpp"
+#include "jtagInterface.hpp"
 
 /*!
  * \file UsbBlaster.hpp
@@ -40,8 +44,8 @@ class UsbBlaster_ll {
 
 class UsbBlaster : public JtagInterface {
  public:
-	UsbBlaster(int vid, int pid, const std::string &firmware_path,
-			bool verbose = false);
+	UsbBlaster(const cable_t &cable, const std::string &firmware_path,
+			int8_t verbose = 0);
 	virtual ~UsbBlaster();
 
 	int setClkFreq(uint32_t clkHZ) override;
@@ -54,10 +58,10 @@ class UsbBlaster : public JtagInterface {
 	 * \param flush_buffer force flushing the buffer
 	 * \return number of state written
 	 * */
-	int writeTMS(uint8_t *tms, int len, bool flush_buffer) override;
+	int writeTMS(const uint8_t *tms, uint32_t len, bool flush_buffer, const uint8_t tdi = 1) override;
 
 	/* TDI */
-	int writeTDI(uint8_t *tx, uint8_t *rx, uint32_t len, bool end) override;
+	int writeTDI(const uint8_t *tx, uint8_t *rx, uint32_t len, bool end) override;
 	/*!
 	 * \brief toggle clock with static tms and tdi
 	 * \param tms TMS state
@@ -78,23 +82,38 @@ class UsbBlaster : public JtagInterface {
 
 	int flush() override;
 
+	/*!
+	 * \brief configure an FPGA using the passive serial pin mapping
+	 * TCK=DCLK, TDO=CONF_DONE, TMS=nCONFIG and TDI=DATA0
+	 * \param data raw configuration bytes, shifted LSB first
+	 * \param length number of bytes to send
+	 */
+	void programPassiveSerial(const uint8_t *data, uint32_t length);
+
  private:
 	UsbBlaster_ll *ll_driver;
 	int writeByte(uint8_t *tdo, int nb_byte);
 	int writeBit(uint8_t *tdo, int nb_bit);
 	int write(bool read, int rd_len);
 	int setBitmode(uint8_t mode);
+	int setPassiveSerialPins(bool dclk, bool nconfig, bool data0);
+	bool readConfDone();
+	int shiftPassiveSerial(const uint8_t *data, uint32_t length);
+	int clockPassiveSerial(uint32_t cycles);
 	uint8_t *_in_buf;
 
-	bool _verbose;
+	int8_t _verbose;
 	uint8_t _tck_pin; /*!< tck pin: 1 << pin id */
 	uint8_t _tms_pin; /*!< tms pin: 1 << pin id */
 	uint8_t _tdi_pin; /*!< tdi pin: 1 << pin id */
 	int _nb_bit;
+	uint8_t _curr_tdi;
 	uint8_t _curr_tms;
 	uint16_t _buffer_size;
+	bool _passive_serial_mode;
 };
 
+#ifdef ENABLE_USB_BLASTERI
 /*!
  * \file UsbBlaster.hpp
  * \class UsbBlasterI
@@ -103,7 +122,7 @@ class UsbBlaster : public JtagInterface {
  */
 class UsbBlasterI: public UsbBlaster_ll {
 	public:
-		UsbBlasterI();
+		UsbBlasterI(uint16_t pid);
 		virtual ~UsbBlasterI();
 
 		int setClkFreq(uint32_t clkHZ) override;
@@ -111,13 +130,11 @@ class UsbBlasterI: public UsbBlaster_ll {
 		int write(uint8_t *wr_buf, int wr_len,
 				uint8_t *rd_buf, int rd_len) override;
 	private:
-		/*
-		 * \brief init and configure FT245
-		 */
-		void init_internal();
-		struct ftdi_context *_ftdi; /*!< ftid_context */
+		struct ftdi_context *_ftdi; /*!< ftdi_context */
 };
+#endif
 
+#ifdef ENABLE_USB_BLASTERII
 /*!
  * \file UsbBlaster.hpp
  * \class UsbBlasterII
@@ -137,3 +154,4 @@ class UsbBlasterII: public UsbBlaster_ll {
 		FX2_ll *fx2;
 };
 #endif
+#endif  // SRC_USBBLASTER_HPP_

@@ -11,7 +11,6 @@
 #include "display.hpp"
 #include "ihexParser.hpp"
 
-using namespace std;
 
 /* line format
  * :LLAAAATTHH...HHCC
@@ -25,7 +24,7 @@ using namespace std;
  *        01 -> end of file
  *        02 -> extended addr
  *        03 -> start segment addr record
- *        04 -> extented linear addr record
+ *        04 -> extended linear addr record
  *        05 -> start linear addr record
  */
 
@@ -34,7 +33,7 @@ using namespace std;
 #define TYPE_BASE 7
 #define DATA_BASE 9
 
-IhexParser::IhexParser(const string &filename, bool reverseOrder, bool verbose):
+IhexParser::IhexParser(const std::string &filename, bool reverseOrder, bool verbose):
 		ConfigBitstreamParser(filename, ConfigBitstreamParser::ASCII_MODE,
 		verbose),
 		_base_addr(0), _reverseOrder(reverseOrder)
@@ -42,8 +41,8 @@ IhexParser::IhexParser(const string &filename, bool reverseOrder, bool verbose):
 
 int IhexParser::parse()
 {
-	string str;
-	istringstream lineStream(_raw_data);
+	std::string str;
+	std::istringstream lineStream(_raw_data);
 
 	uint16_t next_addr = 0;
 	bool is_first = true;
@@ -95,6 +94,8 @@ int IhexParser::parse()
 			}
 
 			ptr = (char *)&str[DATA_BASE];
+			if (_bit_data.size() < loc_addr + byteLen)
+				_bit_data.resize(2*(loc_addr + byteLen));
 			for (int i = 0; i < byteLen; i++, ptr += 2) {
 				sscanf(ptr, "%2hx", &tmp);
 				_bit_data[loc_addr + i] = (_reverseOrder)? reverseByte(tmp):tmp;
@@ -110,13 +111,38 @@ int IhexParser::parse()
 				_array_content.push_back(cnt);
 			return EXIT_SUCCESS;
 			break;
+		case 4:  // Extended Linear Address Record
+			if (addr != 0 || byteLen != 2) {
+				printError("Error: Wrong Extented Linear Address Record instruction");
+				return EXIT_FAILURE;
+			}
+			sscanf((char *)&str[DATA_BASE], "%4hx", &tmp);
+			_base_addr = ((uint32_t)tmp << 16);
+			sum += ((tmp >> 0) & 0xff) + ((tmp >> 8) & 0xff);
+			break;
+		case 5:  // Start Linear Address Record.
+			if (addr != 0 || byteLen != 4) {
+				printError("Error: Wrong Start Linear Address Record instruction");
+				return EXIT_FAILURE;
+			}
+			sscanf((char *)&str[DATA_BASE], "%4x", &addr);
+			_base_addr = addr;
+			for (uint8_t i = 0; i < 4; i++)
+				sum += (addr >> (i * 8)) & 0xff;
+			break;
 		default:
-			printError("Error: unknown type");
+			char mess[256];
+			snprintf(mess, 256, "Error: unknown type %d %d %d\n", type,
+				byteLen, addr);
+			printError(mess);
 			return EXIT_FAILURE;
 		}
 
 		if (checksum != (0xff&((~sum)+1))) {
-			printError("Error: wrong checksum");
+			char mess[256];
+			snprintf(mess, 256, "Error: wrong checksum %02x %02x %02x",
+				checksum, sum, (0xff & ((~sum) + 1)));
+			printError(mess);
 			return EXIT_FAILURE;
 		}
 	}

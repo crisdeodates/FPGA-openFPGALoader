@@ -21,7 +21,6 @@
 
 #include "dfu.hpp"
 
-using namespace std;
 
 /* USB request write */
 static const uint8_t DFU_REQUEST_OUT = LIBUSB_ENDPOINT_OUT |
@@ -46,23 +45,29 @@ enum dfu_cmd {
  * - index as jtag chain (fix issue when more than one device connected)
  */
 
-DFU::DFU(const string &filename, uint16_t vid, uint16_t pid,
-		int verbose_lvl):_verbose(verbose_lvl > 0),
+DFU::DFU(const std::string &filename, bool bypass_bitstream,
+		uint16_t vid, uint16_t pid, int16_t altsetting,
+		int verbose_lvl):_verbose(verbose_lvl > 0), _debug(verbose_lvl > 1),
 		_quiet(verbose_lvl < 0), dev_idx(0), _vid(0), _pid(0),
+		_altsetting(altsetting),
 		usb_ctx(NULL), dev_handle(NULL), curr_intf(0), transaction(0),
 		_bit(NULL)
 {
 	struct dfu_status status;
-	int dfu_vid = 0, dfu_pid = 0;
+	int dfu_vid = 0, dfu_pid = 0, ret;
 
-	if (!filename.empty()) {
-		printInfo("Open file " + filename + " ", false);
+	printInfo("Open file : ", false);
+
+	if (bypass_bitstream) {
+		_bit = nullptr;
+		printInfo("bypassed");
+	} else {
 		try {
 			_bit = new DFUFileParser(filename, _verbose > 0);
 			printSuccess("DONE");
 		} catch (std::exception &e) {
 			printError("FAIL");
-			throw runtime_error("Error: Fail to open file");
+			throw std::runtime_error("Error: Fail to open file");
 		}
 
 		printInfo("Parse file ", false);
@@ -72,7 +77,7 @@ DFU::DFU(const string &filename, uint16_t vid, uint16_t pid,
 		} catch (std::exception &e) {
 			printError("FAIL");
 			delete _bit;
-			throw runtime_error("Error: Fail to parse file");
+			throw std::runtime_error("Error: Fail to parse file");
 		}
 
 		if (_verbose > 0)
@@ -97,6 +102,7 @@ DFU::DFU(const string &filename, uint16_t vid, uint16_t pid,
 	if ((dfu_vid == 0 || dfu_pid == 0) && (vid == 0 || pid == 0)) {
 		// search all DFU compatible devices
 		if (searchDFUDevices() != EXIT_SUCCESS) {
+			libusb_exit(usb_ctx);
 			delete _bit;
 			throw std::runtime_error("Devices enumeration failed");
 		}
@@ -111,9 +117,14 @@ DFU::DFU(const string &filename, uint16_t vid, uint16_t pid,
 	/* check if DFU compatible devices are present */
 	if (dfu_dev.size() != 0) {
 		/* more than one: only possible if file is not DFU */
-		if (dfu_dev.size() > 1 && !filename.empty())
+		if (dfu_dev.size() > 1 && !filename.empty()) {
+			libusb_exit(usb_ctx);
+			delete _bit;
 			throw std::runtime_error("Only one device supported");
+		}
 	} else {
+		libusb_exit(usb_ctx);
+		delete _bit;
 		throw std::runtime_error("No DFU compatible device found");
 	}
 
@@ -121,19 +132,33 @@ DFU::DFU(const string &filename, uint16_t vid, uint16_t pid,
 		displayDFU();
 
 	/* don't try device without vid/pid */
-	if (_vid == 0 || _pid == 0)
+	if ((_vid == 0 || _pid == 0) && _bit) {
+		libusb_exit(usb_ctx);
+		delete _bit;
+		throw std::runtime_error("Can't open device vid/pid == 0");
+	}
+
+	/* the If bitstream has been bypassed -> it's the end */
+	if (!_bit)
 		return;
 
 	/* open the first */
 	if (open_DFU(0) == EXIT_FAILURE) {
+		libusb_exit(usb_ctx);
 		delete _bit;
 		throw std::runtime_error("Fail to claim device");
 	}
 
-	char state = get_state();
+	printf("%02x %02x\n", _vid, _pid);
+
 	if (_verbose > 0) {
-		printInfo("Default DFU status " + dfu_dev_state_val[state]);
-		get_status(&status);
+		if ((ret = get_status(&status)) < 0) {
+			delete _bit;
+			throw std::runtime_error("get device status failed with error code " +
+				std::to_string(ret));
+		}
+
+		printInfo("Default DFU status " + dfu_dev_state_val[status.bState]);
 	}
 }
 
@@ -141,7 +166,8 @@ DFU::~DFU()
 {
 	close_DFU();
 	libusb_exit(usb_ctx);
-	delete _bit;
+	if (_bit)
+		delete _bit;
 }
 
 /* open the device using VID and PID
@@ -149,6 +175,7 @@ DFU::~DFU()
 int DFU::open_DFU(int index)
 {
 	struct dfu_dev curr_dfu;
+	int ret;
 
 	if (_vid == 0 || _pid == 0) {
 		printError("Error: Can't open device without VID/PID");
@@ -165,15 +192,16 @@ int DFU::open_DFU(int index)
 		printError("Error: fail to open device");
 		return EXIT_FAILURE;
 	}
-	if (libusb_claim_interface(dev_handle, curr_intf) != 0) {
+	if ((ret = libusb_claim_interface(dev_handle, curr_intf)) != 0) {
 		libusb_close(dev_handle);
-		printError("Error: fail to claim interface");
+		printError("Error: fail to claim interface with error code " + std::to_string(ret));
 		return EXIT_FAILURE;
 	}
-	if (libusb_set_interface_alt_setting(dev_handle, curr_intf, 0) != 0) {
+	if ((ret = libusb_set_interface_alt_setting(dev_handle, curr_intf, _altsetting)) != 0) {
 		libusb_release_interface(dev_handle, curr_intf);
 		libusb_close(dev_handle);
-		printError("Error: fail to set interface");
+		printError("Error: fail to set interface " + std::to_string(curr_intf) +
+				   " with error code " + std::to_string(ret));
 		return EXIT_FAILURE;
 	}
 
@@ -272,7 +300,7 @@ int DFU::searchDFUDevices()
 	/* iteration */
 	ssize_t list_size = libusb_get_device_list(usb_ctx, &dev_list);
 	if (_verbose)
-		printInfo("found " + to_string(list_size) + " USB device");
+		printInfo("found " + std::to_string(list_size) + " USB device");
 
 	while ((usb_dev = dev_list[i++]) != NULL) {
 		struct libusb_device_descriptor desc;
@@ -282,18 +310,29 @@ int DFU::searchDFUDevices()
 		}
 
 		if (_verbose > 0) {
-			printf("%04x:%04x (bus %d, device %2d)",
-            	desc.idVendor, desc.idProduct,
-            	libusb_get_bus_number(usb_dev),
+			printf("%04x:%04x (bus %d, device %2d)\n",
+				desc.idVendor, desc.idProduct,
+				libusb_get_bus_number(usb_dev),
 				libusb_get_device_address(usb_dev));
 		}
 
-		libusb_open(usb_dev, &handle);
-
-		if (searchIfDFU(handle, usb_dev, &desc) != 0) {
-			return EXIT_FAILURE;
+		int ret = libusb_open(usb_dev, &handle);
+		if (ret == 0) {
+			ret = searchIfDFU(handle, usb_dev, &desc);
+			libusb_close(handle);
+			if (ret != 0) {
+				return EXIT_FAILURE;
+			}
+		} else if (_debug) {
+			char mess[256];
+			snprintf(mess, 256, "Unable to open device: "
+				"%04x:%04x (bus %d, device %2d) Error: %s -> skip\n",
+				desc.idVendor, desc.idProduct,
+				libusb_get_bus_number(usb_dev),
+				libusb_get_device_address(usb_dev),
+				libusb_error_name(ret));
+			printWarn(mess);
 		}
-		libusb_close(handle);
 	}
 
 	libusb_free_device_list(dev_list, 1);
@@ -312,12 +351,15 @@ int DFU::searchIfDFU(struct libusb_device_handle *handle,
 		struct libusb_config_descriptor *cfg;
 		int ret = libusb_get_config_descriptor(dev, i, &cfg);
 		if (ret != 0) {
-			printError("Fail to retrieve config_descriptor " + to_string(i));
+			printError("Fail to retrieve config_descriptor " + std::to_string(i));
 			return 1;
 		}
 		/* configuration interface iteration */
 		for (int if_idx=0; if_idx < cfg->bNumInterfaces; if_idx++) {
 			const struct libusb_interface *uif = &cfg->interface[if_idx];
+			std::vector<struct dfu_dev> dfu_dev_tmp;
+			struct dfu_desc *dfu_desc;
+			bool dfu_found = false;
 
 			/* altsettings interation */
 			for (int intf_idx = 0; intf_idx < uif->num_altsetting; intf_idx++) {
@@ -330,23 +372,57 @@ int DFU::searchIfDFU(struct libusb_device_handle *handle,
 						printInfo("DFU found");
 
 					/* dfu functional descriptor */
+					/* not all DFU implementations provides a descriptor per altsettings
+					 * so don't stop directly.
+					 */
 					if (parseDFUDescriptor(intf, reinterpret_cast<uint8_t *>(&my_dev.dfu_desc),
-								sizeof(my_dev.dfu_desc)) != 0)
-						continue;  // not compatible
+								sizeof(my_dev.dfu_desc))) {
+						dfu_desc = &my_dev.dfu_desc;
+						dfu_found = true;
+					}
+					/* this altsetting is a DFU interface:
+					 * - if user has selected one altsetting current is only stored if it match
+					 * - otherwise all are stored
+					 */
+					if (_altsetting != -1 && _altsetting != intf_idx)
+						continue;
 					my_dev.vid = desc->idVendor;
 					my_dev.pid = desc->idProduct;
+					my_dev.altsettings = intf_idx;
 					my_dev.interface = if_idx;
 					my_dev.bus = libusb_get_bus_number(dev);
 					my_dev.device = libusb_get_device_address(dev);
 					my_dev.bMaxPacketSize0 = desc->bMaxPacketSize0;
 
+					memset(my_dev.iProduct, 0, 128);
 					libusb_get_string_descriptor_ascii(handle, desc->iProduct,
 						my_dev.iProduct, 128);
+					if (strlen((char *)my_dev.iProduct) == 0)
+						snprintf((char *)my_dev.iProduct, 128, "empty");
+
+					memset(my_dev.iInterface, 0, 128);
+					libusb_get_string_descriptor_ascii(handle, intf->iInterface,
+						my_dev.iInterface, 128);
+					if (strlen((char *)my_dev.iInterface) == 0)
+						snprintf((char *)my_dev.iInterface, 128, "empty");
 
 					int r = libusb_get_port_numbers(dev, my_dev.path, sizeof(my_dev.path));
 					my_dev.path[r] = '\0';
-					dfu_dev.push_back(my_dev);
+					dfu_dev_tmp.push_back(my_dev);
 				}
+			}
+
+			/* At least one altsetting has a DFU descriptor */
+			if (dfu_found) {
+				/* with tinyDFU only one (the first) altsetting contains a descriptor
+				 * fill others with this information
+				 */
+				for (struct dfu_dev &d: dfu_dev_tmp) {
+					if (d.dfu_desc.bDescriptorType == 0)
+						memcpy(&d.dfu_desc, dfu_desc, sizeof(struct dfu_desc));
+				}
+				std::move(dfu_dev_tmp.begin(), dfu_dev_tmp.end(), std::back_inserter(dfu_dev));
+
 			}
 		}
 
@@ -361,34 +437,39 @@ int DFU::searchIfDFU(struct libusb_device_handle *handle,
  * Since libusb has no support for those structure
  * fill a custom structure
  */
-int DFU::parseDFUDescriptor(const struct libusb_interface_descriptor *intf,
+bool DFU::parseDFUDescriptor(const struct libusb_interface_descriptor *intf,
 		uint8_t *dfu_desc, int dfu_desc_size)
 {
 	const uint8_t *extra = intf->extra;
 	int extra_len = intf->extra_length;
 
+	/* not all altsettings for a DFU device have a DFU descriptor
+	 * set to 0 to be able to detect a missing descriptor
+	 */
+	memset(dfu_desc, 0, 9);
+
 	if (extra_len < 9)
-		return -1;
+		return false;
 
 	/* map memory to structure */
 	for (int j = 0; j + 1  < extra_len; j++) {
 		if (extra[j+1] == 0x21) {
 			memcpy(dfu_desc, (const void *)&extra[j], dfu_desc_size);
-			break;
+			return true;
 		}
 	}
 
-	return 0;
+	return false;
 }
 
 /* abstraction to send/receive to control */
 int DFU::send(bool out, uint8_t brequest, uint16_t wvalue,
-		unsigned char *data, uint16_t length)
+		const uint8_t *data, uint16_t length)
 {
 	uint8_t type = out ? DFU_REQUEST_OUT : DFU_REQUEST_IN;
 	int ret = libusb_control_transfer(dev_handle, type,
 				brequest, wvalue, curr_intf,
-				data, length, 5000);
+				const_cast<uint8_t *>(data), length, 5000);
 	if (ret < 0) {
 		if (checkDevicePresent()) {
 			/* close device ? */
@@ -405,9 +486,11 @@ int DFU::set_state(char newState)
 {
 	int ret = 0;
 	struct dfu_status status;
-	char curr_state = get_state();
-	while (curr_state != newState) {
-		switch (curr_state) {
+	if (get_status(&status) < 0)
+		return -1;
+
+	while (status.bState != newState) {
+		switch (status.bState) {
 		case STATE_appIDLE:
 			if (dfu_detach() == EXIT_FAILURE)
 				return -1;
@@ -415,10 +498,9 @@ int DFU::set_state(char newState)
 				return -1;
 			if (status.bState != STATE_appDETACH ||
 					status.bStatus != STATUS_OK) {
-				cerr << dfu_dev_status_val[status.bStatus] << endl;
+				std::cerr << dfu_dev_status_val[status.bStatus] << std::endl;
 				return -1;
 			}
-			curr_state = status.bState;
 			break;
 		case STATE_appDETACH:
 			if (newState == STATE_appIDLE) {
@@ -433,11 +515,13 @@ int DFU::set_state(char newState)
 			 * an handle others states */
 			if (newState == STATE_appIDLE) {
 				// reset
+				ret = libusb_reset_device(dev_handle);
 				// reenum
 			} else {  // download or upload
 					  // are handled by download() and upload()
 				return -2;
 			}
+			return ret;
 			break;
 		case STATE_dfuDNLOAD_IDLE:
 			if (newState == STATE_dfuMANIFEST_SYNC) {
@@ -454,15 +538,14 @@ int DFU::set_state(char newState)
 				printError("Fails to send packet\n");
 				return ret;
 			}
-			if ((ret = get_state()) < 0)
+			if (get_status(&status) < 0)
 				return ret;
 			/* not always true:
 			 * the newState may be the next one or another */
-			if (ret != newState) {
-				printError(dfu_dev_state_val[ret]);
+			if (status.bState != newState) {
+				printError(dfu_dev_state_val[status.bState]);
 				return -1;
 			}
-			curr_state = ret;
 			break;
 		case STATE_dfuERROR:
 			if (newState == STATE_appIDLE) {
@@ -487,10 +570,9 @@ int DFU::set_state(char newState)
 				return ret;
 			if (status.bState != newState ||
 					status.bStatus != STATUS_OK) {
-				cerr << dfu_dev_status_val[status.bStatus] << endl;
+				std::cerr << dfu_dev_status_val[status.bStatus] << std::endl;
 				return -1;
 			}
-			curr_state = status.bState;
 			break;
 		}
 	}
@@ -508,7 +590,7 @@ int DFU::dfu_detach()
 
 int DFU::get_status(struct dfu_status *status)
 {
-	uint8_t buffer[6];
+	uint8_t buffer[6] = {0};
 	int res;
 
 	res = send(false, DFU_GETSTATUS, 0, buffer, 6);
@@ -520,6 +602,10 @@ int DFU::get_status(struct dfu_status *status)
 								(((uint32_t)buffer[1] & 0xff) <<  0);
 		status->bState = buffer[4];
 		status->iString = buffer[5];
+	} else if (res < 0) {
+		printError("Get DFU status failed with error " +
+				   std::to_string(res) +
+				   "(" + std::string(libusb_error_name(res)) + ")");
 	}
 	return res;
 }
@@ -529,7 +615,7 @@ int DFU::get_status(struct dfu_status *status)
  */
 char DFU::get_state()
 {
-	char c;
+	char c = 0;
 
 	int res = send(false, DFU_GETSTATE, 0, (unsigned char *)&c, 1);
 
@@ -548,7 +634,7 @@ int DFU::poll_state(uint8_t state) {
 	do {
 		ret = get_status(&status);
 		if (ret <= 0) {
-			printError("Error: poll state " + string(libusb_error_name(ret)));
+			printError("Error: poll state " + std::string(libusb_error_name(ret)));
 			break;
 		}
 		/* millisecond */
@@ -566,13 +652,15 @@ void DFU::displayDFU()
 	/* display dfu device */
 	printf("Found DFU:\n");
 	for (unsigned int i = 0; i < dfu_dev.size(); i++) {
-		printf("%04x:%04x (bus %d, device %2d)",
-            dfu_dev[i].vid, dfu_dev[i].pid,
-            dfu_dev[i].bus, dfu_dev[i].device);
-		printf(" path: %d: iProduct %s", dfu_dev[i].path[0],
-				dfu_dev[i].iProduct);
+		printf("%04x:%04x (bus %d, device %2d),",
+			dfu_dev[i].vid, dfu_dev[i].pid,
+			dfu_dev[i].bus, dfu_dev[i].device);
+		printf(" path: %d",dfu_dev[i].path[0]);
 		for (size_t j = 1; j < strlen(((const char *)dfu_dev[i].path)); j++)
 			printf(".%d", dfu_dev[i].path[j]);
+		printf(", alt: %d, iProduct \"%s\", iInterface \"%s\"",
+				dfu_dev[i].altsettings,
+				dfu_dev[i].iProduct, dfu_dev[i].iInterface);
 		printf("\n");
 		printf("\tDFU details\n");
 		printf("\t\tbLength         %02x\n", dfu_dev[i].dfu_desc.bLength);
@@ -625,9 +713,13 @@ int DFU::download()
 		printError("Error: No device. Can't download file");
 		return -1;
 	}
+	if (!_bit) {
+		printError("Error: No bitstream. Stop");
+		return -1;
+	}
 
 	int ret, ret_val = EXIT_SUCCESS;
-	uint8_t *buffer, *ptr;
+	const uint8_t *buffer, *ptr;
 	int size, xfer_len;
 	int bMaxPacketSize0 = dfu_dev[dev_idx].bMaxPacketSize0;
 
@@ -641,7 +733,9 @@ int DFU::download()
 	}
 
 	/* download must start in dfu IDLE state */
-	if (get_state() != STATE_dfuIDLE)
+	if (get_status(&status) < 0)
+		return -1;
+	if (status.bState != STATE_dfuIDLE)
 		set_state(STATE_dfuIDLE);
 
 	xfer_len = libusb_le16_to_cpu(curr_dev.dfu_desc.wTransferSize);
@@ -701,11 +795,15 @@ int DFU::download()
 	/* send the zero sized download request
 	 * dfuDNLOAD_IDLE -> dfuMANITEST-SYNC
 	 */
-	ret = set_state(STATE_dfuMANIFEST_SYNC);
+	printInfo("send zero sized download request: ", false);
+	//ret = set_state(STATE_dfuMANIFEST_SYNC);
+	ret = send(true, DFU_DNLOAD, transaction, NULL, 0);
 	if (ret < 0) {
-		printError("Error: fail to change state " + to_string(ret));
+		printError("Error: fail to change state " + std::to_string(ret));
 		return -6;
 	}
+
+	printSuccess("DONE");
 
 	/* Now FSM must be in dfuMANITEST-SYNC */
 	bool must_continue = true;
@@ -758,6 +856,9 @@ int DFU::download()
 				break;
 		}
 	} while (must_continue);
+
+	if (status.bState == STATE_dfuIDLE)
+		set_state(STATE_appIDLE);
 
 	return ret_val;
 }

@@ -3,9 +3,10 @@
  * Copyright (C) 2020 Gwenhael Goavec-Merou <gwenhael.goavec-merou@trabucayre.com>
  */
 
-#ifndef _JTAGINTERFACE_H_
-#define _JTAGINTERFACE_H_
+#ifndef SRC_JTAGINTERFACE_HPP_
+#define SRC_JTAGINTERFACE_HPP_
 
+#include <cstdint>
 #include <iostream>
 #include <vector>
 
@@ -23,13 +24,36 @@ class JtagInterface {
 	virtual int setClkFreq(uint32_t clkHZ) = 0;
 	virtual uint32_t getClkFreq() {return _clkHZ;}
 
+	enum tck_edge_t {
+		FALLING_EDGE = 0,
+		RISING_EDGE  = 1,
+		NONE_EDGE    = 2,
+	};
+
+	/*!
+	 * Return constant to describe if read is on rising or falling TCK edge
+	 */
+	virtual tck_edge_t getReadEdge() { return NONE_EDGE; }
+	/*!
+	 * configure TCK edge used for read
+	 */
+	virtual void setReadEdge(tck_edge_t rd_edge) { (void) rd_edge; }
+	/*!
+	 * Return constant to describe if write is on rising or falling TCK edge
+	 */
+	virtual tck_edge_t getWriteEdge() { return NONE_EDGE; }
+	/*!
+	 * configure TCK edge used for write
+	 */
+	virtual void setWriteEdge(tck_edge_t wr_edge) { (void)wr_edge; }
+
 	/*!
 	 * \brief flush TMS internal buffer (ie. transmit to converter)
 	 * \param tdo: pointer for read operation. May be NULL
 	 * \param len: number of bit to send
 	 * \return number of bit send/received
 	 */
-	virtual int writeTMS(uint8_t *tms, int len, bool flush_buffer) = 0;
+	virtual int writeTMS(const uint8_t *tms, uint32_t len, bool flush_buffer, const uint8_t tdi = 1) = 0;
 
 	/*!
 	 * \brief send TDI bits (mainly in shift DR/IR state)
@@ -40,8 +64,18 @@ class JtagInterface {
 	 *             but only in shift[i|d]r, if end is false tms remain the same.
 	 * \return number of bit written and/or read
 	 */
-	virtual int writeTDI(uint8_t *tx, uint8_t *rx, uint32_t len, bool end) = 0;
-
+	virtual int writeTDI(const uint8_t *tx, uint8_t *rx, uint32_t len, bool end) = 0;
+	/*!
+	 * \brief send TMD and TDI and receive tdo bits;
+	 * \param tms: array of TMS values (used to write)
+	 * \param tdi: array of TDI values (used to write)
+	 * \param tdo: array of TDO values (used when read)
+	 * \param len: number of bit to send/receive
+	 * \return true with full buffers are sent, false otherwise
+	 */
+	virtual bool writeTMSTDI(const uint8_t *tms, const uint8_t *tdi,
+			uint8_t *tdo, uint32_t len)
+	{ (void)tms; (void)tdi; (void)tdo; (void)len; return false;}
 	/*!
 	 * \brief toggle clk without touch of TDI/TMS
 	 * \param tms: state of tms signal
@@ -58,6 +92,20 @@ class JtagInterface {
 	virtual int get_buffer_size() = 0;
 
 	/*!
+	 * \brief let a caller ask for a preferred bulk-transfer size (in bits)
+	 *        before splitting a large shiftDR/writeTDI() into fixed-size
+	 *        chunks; adapters that don't care simply don't override this,
+	 *        in which case the caller's own default is returned unchanged
+	 * \param[in] default_bits: the chunk size (in bits) the caller would
+	 *            use if the adapter has no opinion
+	 * \return the chunk size (in bits) the caller should use
+	 */
+	virtual uint32_t preferred_xfer_bits(uint32_t default_bits)
+	{
+		return default_bits;
+	}
+
+	/*!
 	 * \brief return status of internal buffer
 	 * \return true when internal buffer is full
 	 */
@@ -68,7 +116,8 @@ class JtagInterface {
 	 * \return 1 if success, 0 if nothing to write, -1 is something wrong
 	 */
 	virtual int flush() = 0;
+
  protected:
 	uint32_t _clkHZ; /*!< current clk frequency */
 };
-#endif  // _JTAGINTERFACE_H_
+#endif  // SRC_JTAGINTERFACE_HPP_
